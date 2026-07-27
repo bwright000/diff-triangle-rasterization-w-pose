@@ -381,8 +381,12 @@
 		offsets[cumsum_for_triangle + i] = offset; 
 	 }
 
-	 // or distance_points < 1 or dist > -1
-	if (distance_points > 1600 or distance_points < 1 or dist > -1) {
+	// Cull only truly degenerate triangles. `dist` is minus the screen-space
+	// inradius in pixels; `!(dist < ...)` also catches NaN from degenerate
+	// projections (zero-length edges). Culling anything larger (the old
+	// `distance_points < 1 or dist > -1`) made small/sliver triangles vanish
+	// once they projected below ~1px, leaving holes in the mesh at a distance.
+	if (distance_points > 1600.0f || !(dist < -0.01f)) {
 			radii[idx] = 0;
 			tiles_touched[idx] = 0;
 			scaling[idx] = 0.0f;
