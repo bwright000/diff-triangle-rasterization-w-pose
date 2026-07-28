@@ -10,6 +10,12 @@ the **camera pose** (6-DoF) and to the **vertex world positions** and
 **per-vertex opacity**, so the same rasteriser can be used for both tracking and
 mapping. Triangle opacity is the **mean** of its three vertex weights.
 
+The camera-pose gradient follows the analytic SE(3) Jacobian formulation of
+[Gaussian Splatting SLAM](https://github.com/muskie82/MonoGS) (MonoGS), and
+adapts code from its
+[`diff-gaussian-rasterization-w-pose`](https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose)
+rasteriser (in particular `cuda_rasterizer/math.h` and the pose backward pass).
+
 If you use this rasteriser in your own research, please cite the works below.
 
 ## BibTeX
@@ -37,6 +43,18 @@ year = {2025}
       month        = {July},
       year         = {2023},
       url          = {https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/}
+}
+```
+
+Gaussian Splatting SLAM, from which the camera-pose gradient formulation and
+parts of the pose backward pass are adapted:
+
+```bibtex
+@inproceedings{Matsuki:Murai:etal:CVPR2024,
+  title={{G}aussian {S}platting {SLAM}},
+  author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  year={2024}
 }
 ```
 
