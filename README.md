@@ -50,7 +50,7 @@ Gaussian Splatting SLAM, from which the camera-pose gradient formulation and
 parts of the pose backward pass are adapted:
 
 ```bibtex
-@inproceedings{Matsuki:Murai:etal:CVPR2024,
+@inproceedings{matsukimonogs,
   title={{G}aussian {S}platting {SLAM}},
   author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
   booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
