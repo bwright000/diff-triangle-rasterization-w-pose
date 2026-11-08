@@ -463,7 +463,11 @@
  // Main rasterization method. Collaboratively works on one tile per
  // block, each thread treats one pixel. Alternates between fetching 
  // and rasterizing data.
- template <uint32_t CHANNELS>
+ // SMEM_ATTR (PERF #9): per-entry vertex indices / depths / features are staged
+ // in shared memory once per batch instead of being fetched from global memory
+ // on every pixel hit. Selected at launch from perf_mask; SMEM_ATTR == false
+ // is the original kernel (the extra arrays shrink to 1 element).
+ template <uint32_t CHANNELS, bool SMEM_ATTR>
  __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
  renderCUDA(
 	 const uint2* __restrict__ ranges,
@@ -521,6 +525,10 @@
 	 __shared__ float2 collected_xy[BLOCK_SIZE];
 	 __shared__ float2 collected_phi_center[BLOCK_SIZE];
 	 __shared__ float2 collected_p_images[BLOCK_SIZE * MAX_NB_POINTS];
+	 // PERF #9 staging (entry-major: [entry][vertex k][channel])
+	 __shared__ int collected_vidx[SMEM_ATTR ? BLOCK_SIZE * 3 : 1];
+	 __shared__ float collected_vdepth[SMEM_ATTR ? BLOCK_SIZE * 3 : 1];
+	 __shared__ float collected_vfeat[SMEM_ATTR ? BLOCK_SIZE * 3 * CHANNELS : 1];
 	 /*
 	 ===================================================================================================
 	 */
@@ -569,6 +577,16 @@
 				collected_p_images[MAX_NB_POINTS * block.thread_rank() + k] = p_image[3 * coll_id + k];
 			}
 			collected_phi_center[block.thread_rank()] = phi_center[coll_id];
+			if (SMEM_ATTR) {
+				for (int k = 0; k < 3; k++) {
+					const int vi = triangles_indices[3 * coll_id + k];
+					const int slot = 3 * block.thread_rank() + k;
+					collected_vidx[slot] = vi;
+					collected_vdepth[slot] = vertex_depth[vi];
+					for (int ch = 0; ch < CHANNELS; ch++)
+						collected_vfeat[slot * CHANNELS + ch] = features[vi * CHANNELS + ch];
+				}
+			}
 		 }
 		 block.sync();
  
@@ -646,13 +664,25 @@
 			 float b2 = 1.0f - b0 - b1;
 			
 			 int aux = 3 * j_id;
-			 int vertex_idx0 = triangles_indices[aux];
-			 int vertex_idx1 = triangles_indices[aux + 1];
-			 int vertex_idx2 = triangles_indices[aux + 2];
+			 int vertex_idx0, vertex_idx1, vertex_idx2;
+			 float depth_vertex_0, depth_vertex_1, depth_vertex_2;
+			 if (SMEM_ATTR) {
+				 // PERF #9: same values, read from the batch staging (same arithmetic below)
+				 vertex_idx0 = collected_vidx[3 * j + 0];
+				 vertex_idx1 = collected_vidx[3 * j + 1];
+				 vertex_idx2 = collected_vidx[3 * j + 2];
+				 depth_vertex_0 = collected_vdepth[3 * j + 0];
+				 depth_vertex_1 = collected_vdepth[3 * j + 1];
+				 depth_vertex_2 = collected_vdepth[3 * j + 2];
+			 } else {
+			 vertex_idx0 = triangles_indices[aux];
+			 vertex_idx1 = triangles_indices[aux + 1];
+			 vertex_idx2 = triangles_indices[aux + 2];
 
-			 float depth_vertex_0 =  vertex_depth[vertex_idx0];
-			 float depth_vertex_1 =  vertex_depth[vertex_idx1];
-			 float depth_vertex_2 =  vertex_depth[vertex_idx2];
+			 depth_vertex_0 =  vertex_depth[vertex_idx0];
+			 depth_vertex_1 =  vertex_depth[vertex_idx1];
+			 depth_vertex_2 =  vertex_depth[vertex_idx2];
+			 }
 
 			 float wA = b2;    // vertex0
 			 float wB = b0;    // vertex1
@@ -661,9 +691,16 @@
 			 // now blend them
 			 for (int ch = 0; ch < CHANNELS; ++ch) {
 				// Access colors per vertex (not per triangle)
-				float c0 = features[vertex_idx0 * CHANNELS + ch];
-				float c1 = features[vertex_idx1 * CHANNELS + ch];
-				float c2 = features[vertex_idx2 * CHANNELS + ch];
+				float c0, c1, c2;
+				if (SMEM_ATTR) {
+					c0 = collected_vfeat[(3 * j + 0) * CHANNELS + ch];
+					c1 = collected_vfeat[(3 * j + 1) * CHANNELS + ch];
+					c2 = collected_vfeat[(3 * j + 2) * CHANNELS + ch];
+				} else {
+				c0 = features[vertex_idx0 * CHANNELS + ch];
+				c1 = features[vertex_idx1 * CHANNELS + ch];
+				c2 = features[vertex_idx2 * CHANNELS + ch];
+				}
 
 				float interp = wA * c0 + wB * c1 + wC * c2;
 				C[ch] += interp * alpha * T;
@@ -732,7 +769,34 @@
 	int* was_rendered,
 	int perf_mask)
  {
-	 renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+	 // PERF #9 selects the shared-memory-staging instantiation; false == original kernel.
+	 if (perf_mask & PERF_SMEM_ATTR)
+	 renderCUDA<NUM_CHANNELS, true> << <grid, block >> > (
+		 ranges,
+		 point_list,
+		 W, H,
+		 normals,
+		 offsets,
+		 points_xy_image,
+		 vertex_depth,
+		 triangles_indices,
+		 sigma,
+		 colors,
+		 conic_opacity,
+		 depths,
+		 phi_center,
+		 p_image,
+		 final_T,
+		 n_contrib,
+		 bg_color,
+		 out_color,
+		 out_others,
+		 max_blending,
+		 was_rendered,
+		 perf_mask
+		 );
+	 else
+	 renderCUDA<NUM_CHANNELS, false> << <grid, block >> > (
 		 ranges,
 		 point_list,
 		 W, H,

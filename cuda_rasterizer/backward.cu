@@ -890,7 +890,10 @@ __global__ void propagateScreenGradsToPoseCUDA(
  }
  
  // Backward version of the rendering procedure.
- template <uint32_t C>
+ // SMEM_ATTR (PERF #9): per-entry vertex indices / depths / colours are staged
+ // in shared memory once per batch. Selected at launch from perf_mask;
+ // SMEM_ATTR == false is the original kernel (extra arrays shrink to 1 element).
+ template <uint32_t C, bool SMEM_ATTR>
  __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
  renderCUDA(
 	 const uint2* __restrict__ ranges,
@@ -963,6 +966,10 @@ __global__ void propagateScreenGradsToPoseCUDA(
 	 __shared__ float collected_depths[BLOCK_SIZE];
 	 __shared__ float2 collected_xy[BLOCK_SIZE];
 	 __shared__ float2 collected_phi_center[BLOCK_SIZE];
+	 // PERF #9 staging (entry-major: [entry][vertex k][channel])
+	 __shared__ int collected_vidx[SMEM_ATTR ? BLOCK_SIZE * 3 : 1];
+	 __shared__ float collected_vdepth[SMEM_ATTR ? BLOCK_SIZE * 3 : 1];
+	 __shared__ float collected_vcol[SMEM_ATTR ? BLOCK_SIZE * 3 * C : 1];
 	 /*
 	 ===================================================================================================
 	 */
@@ -1084,6 +1091,16 @@ __global__ void propagateScreenGradsToPoseCUDA(
 				collected_p_images[MAX_NB_POINTS * block.thread_rank() + k] = p_image[3 * coll_id + k];
 			}
 			collected_phi_center[block.thread_rank()] = phi_center[coll_id];
+			if (SMEM_ATTR) {
+				for (int k = 0; k < 3; k++) {
+					const int vi = triangles_indices[3 * coll_id + k];
+					const int slot = 3 * block.thread_rank() + k;
+					collected_vidx[slot] = vi;
+					collected_vdepth[slot] = vertex_depth[vi];
+					for (int ch = 0; ch < C; ch++)
+						collected_vcol[slot * C + ch] = colors[vi * C + ch];
+				}
+			}
 		 }
 		 block.sync();
  
@@ -1154,13 +1171,25 @@ __global__ void propagateScreenGradsToPoseCUDA(
 			 float b2 = 1.0f - b0 - b1;
 
 			 int aux = 3 * j_id;
-			 int vertex_idx0 = triangles_indices[aux];
-			 int vertex_idx1 = triangles_indices[aux + 1];
-			 int vertex_idx2 = triangles_indices[aux + 2];
+			 int vertex_idx0, vertex_idx1, vertex_idx2;
+			 float depth_vertex_0, depth_vertex_1, depth_vertex_2;
+			 if (SMEM_ATTR) {
+				 // PERF #9: same values, read from the batch staging (same arithmetic below)
+				 vertex_idx0 = collected_vidx[3 * j + 0];
+				 vertex_idx1 = collected_vidx[3 * j + 1];
+				 vertex_idx2 = collected_vidx[3 * j + 2];
+				 depth_vertex_0 = collected_vdepth[3 * j + 0];
+				 depth_vertex_1 = collected_vdepth[3 * j + 1];
+				 depth_vertex_2 = collected_vdepth[3 * j + 2];
+			 } else {
+			 vertex_idx0 = triangles_indices[aux];
+			 vertex_idx1 = triangles_indices[aux + 1];
+			 vertex_idx2 = triangles_indices[aux + 2];
 
-			 float depth_vertex_0 = vertex_depth[vertex_idx0];
-			 float depth_vertex_1 = vertex_depth[vertex_idx1];
-			 float depth_vertex_2 = vertex_depth[vertex_idx2];
+			 depth_vertex_0 = vertex_depth[vertex_idx0];
+			 depth_vertex_1 = vertex_depth[vertex_idx1];
+			 depth_vertex_2 = vertex_depth[vertex_idx2];
+			 }
 
 			 float wA = b2;    // vertex0
 			 float wB = b0;    // vertex1
@@ -1171,9 +1200,16 @@ __global__ void propagateScreenGradsToPoseCUDA(
 			 float sum0 = 0, sum1 = 0, sum2 = 0;
 			 for (int ch = 0; ch < C; ++ch) {
 				float dL_dcolor_ch = dchannel_dcolor * dL_dpixel[ch];
-				float c0 = colors[vertex_idx0 * C + ch];
-				float c1 = colors[vertex_idx1 * C + ch];
-				float c2 = colors[vertex_idx2 * C + ch];
+				float c0, c1, c2;
+				if (SMEM_ATTR) {
+					c0 = collected_vcol[(3 * j + 0) * C + ch];
+					c1 = collected_vcol[(3 * j + 1) * C + ch];
+					c2 = collected_vcol[(3 * j + 2) * C + ch];
+				} else {
+				c0 = colors[vertex_idx0 * C + ch];
+				c1 = colors[vertex_idx1 * C + ch];
+				c2 = colors[vertex_idx2 * C + ch];
+				}
 
 				interp_color[ch] = wA * c0 + wB * c1 + wC * c2;
 
@@ -1493,7 +1529,41 @@ void BACKWARD::propagateScreenGradsToPose(
 	 int grad_flags
 	)
  {
-	 renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	 // PERF #9 selects the shared-memory-staging instantiation; false == original kernel.
+	 if (perf_mask & PERF_SMEM_ATTR)
+	 renderCUDA<NUM_CHANNELS, true> << <grid, block >> >(
+		 ranges,
+		 point_list,
+		 W, H,
+		 bg_color,
+		 sigma,
+		 triangles_indices,
+		 normals,
+		 offsets,
+		 conic_opacity,
+		 depths,
+		 means2D,
+		 phi_center,
+		 p_image,
+		 vertex_depth,
+		 colors,
+		 final_Ts,
+		 n_contrib,
+		 dL_dpixels,
+		 dL_depths,
+		 dL_dnormals,
+		 dL_doffsets,
+		 dL_dmean2D,
+		 dL_dopacity,
+		 dL_dnormal3D,
+		 dL_dcolors,
+		 dL_dpoints2D,
+		 dL_dvertice_depth,
+		 perf_mask,
+		 grad_flags
+		 );
+	 else
+	 renderCUDA<NUM_CHANNELS, false> << <grid, block >> >(
 		 ranges,
 		 point_list,
 		 W, H,
