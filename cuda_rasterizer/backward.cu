@@ -934,6 +934,12 @@ __global__ void propagateScreenGradsToPoseCUDA(
  
 	 const bool inside = pix.x < W&& pix.y < H;
 	 const bool zskip = (perf_mask & PERF_ZERO_GRAD_SKIP) != 0; // PERF #3
+	 // PERF #4: skip the atomics of gradient buffers that no consumer reads
+	 // (grad_flags built from ctx.needs_input_grad in the python wrapper).
+	 const bool unused_skip = (perf_mask & PERF_UNUSED_GRAD_SKIP) != 0;
+	 const bool do_colors   = !unused_skip || (grad_flags & GRAD_NEED_COLORS);
+	 const bool do_opacity  = !unused_skip || (grad_flags & GRAD_NEED_OPACITY);
+	 const bool do_normal3D = !unused_skip || (grad_flags & GRAD_NEED_NORMAL3D);
 	 const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
  
 	 int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -1189,9 +1195,11 @@ __global__ void propagateScreenGradsToPoseCUDA(
 				float grad1 = dchannel_dcolor * dL_dchannel * b0;  // matches forward's c1 * b0
 				float grad2 = dchannel_dcolor * dL_dchannel * b1;  // matches forward's c2 * b1
 
+				if (do_colors) {
 				atomicAddSkipZero(&dL_dcolors[v0*C + ch], grad0, zskip);
 				atomicAddSkipZero(&dL_dcolors[v1*C + ch], grad1, zskip);
 				atomicAddSkipZero(&dL_dcolors[v2*C + ch], grad2, zskip);
+				}
 
 			 } 
 
@@ -1299,6 +1307,7 @@ __global__ void propagateScreenGradsToPoseCUDA(
 				 accum_normal_rec[ch] = last_alpha * last_normal[ch] + (1.f - last_alpha) * accum_normal_rec[ch];
 				 last_normal[ch] = normal[ch];
 				 dL_dalpha += (normal[ch] - accum_normal_rec[ch]) * dL_dnormal2D[ch];
+				 if (do_normal3D)
 				 atomicAddSkipZero((&dL_dnormal3D[global_id * 3 + ch]), alpha * T * dL_dnormal2D[ch], zskip);
 			 }
  
@@ -1331,6 +1340,7 @@ __global__ void propagateScreenGradsToPoseCUDA(
 			 }
  
 			 // Update gradients w.r.t. opacity of the Triangle
+			 if (do_opacity)
 			 atomicAddSkipZero(&(dL_dopacity[global_id]), dL_dalpha * Cx, zskip);
  
 		 }
