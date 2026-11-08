@@ -25,6 +25,7 @@
 
 #include "config.h"
 #include "stdio.h"
+#include <cstdint>   // PERF #1 tileMayContainTriangle uses uint32_t (adam.cu includes this header first)
 
 #define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
 #define NUM_WARPS (BLOCK_SIZE/32)
