@@ -28,7 +28,10 @@ from diff_triangle_rasterization import TriangleRasterizationSettings, TriangleR
 
 BITS = {1: "#1 tight binning", 2: "#2 bw start at last", 4: "#3 zero-grad skip", 8: "#4 unused-grad skip",
         16: "#8 dead smem loads", 32: "#9 smem vertex attrs", 64: "#10 warp-agg atomics"}
-MASKS = [0, 1, 2, 4, 8, 16, 32, 64, dtr.PERF_MASK_ALL]
+MASKS = [0, 1, 2, 4, 8, 16, 32, 64, 95, dtr.PERF_MASK_ALL]
+# 11-08 A100 run: bit 32 (#9 smem vertex attrs) exceeded the mask-0 envelope on track_pose 1280x720 (4.1x) and is
+# dropped from production; the production mask is 95 (all but #9). Only failures of masks inside --gate-mask fail the
+# run; the others are printed as information.
 DEV = "cuda"
 
 # out_others channels (cuda_rasterizer/auxiliary.h). Channel 6 = per-pixel triangle id
@@ -267,6 +270,8 @@ def main():
     ap.add_argument("--sigma", type=float, default=1.0)
     ap.add_argument("--bench", action="store_true", help="also time fwd+bwd per mask (map_colour, first res)")
     ap.add_argument("--configs", default=",".join(CONFIGS))
+    ap.add_argument("--gate-mask", type=int, default=95,
+                    help="only masks whose bits are all inside this mask can fail the run (production mask)")
     a = ap.parse_args()
     assert torch.cuda.is_available()
     print(f"device: {torch.cuda.get_device_name()}  initial perf mask (env S2TS2_PERF_MASK): {dtr.get_perf_mask()}")
@@ -296,14 +301,14 @@ def main():
                 drop = {"others[0]:depth", "others[5]:median_depth"}
             for name, ok, note in fwd_equal(ref, ref2):
                 if not ok and name not in drop:
-                    failures.append(f"V1 {res} {colour} mask0 not self-consistent: {name}")
+                    failures.append((0, f"V1 {res} {colour} mask0 not self-consistent: {name}"))
             for mask in MASKS[1:]:
                 cur, _ = run(cam, scene, cfg, mask, a.sigma, bg)
                 bad = [n for n, ok, _ in fwd_equal(ref, cur) if not ok and n not in drop]
                 notes = [f"{n} {nt}" for n, ok, nt in fwd_equal(ref, cur) if ok and nt]
                 tag = "OK " if not bad else "FAIL"
                 print(f"V1 {res} {colour:7s} mask {mask:3d} {BITS.get(mask, 'ALL'):22s} {tag} {bad if bad else ''} {notes if notes else ''}")
-                failures += [f"V1 {res} {colour} mask {mask}: {n}" for n in bad]
+                failures += [(mask, f"V1 {res} {colour} mask {mask}: {n}") for n in bad]
 
         # ---------------- V2 backward envelope
         for cname in a.configs.split(","):
@@ -335,15 +340,17 @@ def main():
                     lim = a.env_factor * env[n]
                     ok_env = dev <= lim if env[n] > 0 else dev == 0.0
                     ok_sum = abs(msum) <= a.env_factor * sbase[n] + 1e-9 * scale
-                    asserted = n in check
+                    # precomputed colours: upstream F4 (vertex depth never computed on that path -> the backward reads
+                    # uninitialised memory; mask-0 envelope already ~1e4). V152 never back-propagates through it.
+                    asserted = n in check and cfg["colour"] != "precomp"
                     if asserted and not (ok_env and ok_sum):
-                        failures.append(f"V2 {res} {cname} mask {mask} grad {n}: dev {dev:.3e} env {env[n]:.3e} "
-                                        f"sum {msum:.3e} base-sum {sbase[n]:.3e}")
+                        failures.append((mask, f"V2 {res} {cname} mask {mask} grad {n}: dev {dev:.3e} env {env[n]:.3e} "
+                                        f"sum {msum:.3e} base-sum {sbase[n]:.3e}"))
                     flag = ("ok" if (ok_env and ok_sum) else "BAD") + ("" if asserted else "(info)")
                     ratio = dev / env[n] if env[n] > 0 else (0.0 if dev == 0 else float("inf"))
                     line.append(f"{n}:{flag} r={ratio:.2f}")
                 if fbad:
-                    failures.append(f"V2 {res} {cname} mask {mask}: forward mismatch {fbad}")
+                    failures.append((mask, f"V2 {res} {cname} mask {mask}: forward mismatch {fbad}"))
                 print(f"V2 {res} {cname:12s} mask {mask:3d} fwd={'ok' if not fbad else fbad} | " + "  ".join(line))
 
         # ---------------- optional timing
@@ -363,10 +370,16 @@ def main():
                 print(f"  mask {mask:3d} {BITS.get(mask, 'ALL' if mask else 'baseline'):22s} {ts[len(ts) // 2]:8.3f}")
 
     dtr.set_perf_mask(0)
-    print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILURE(S):"))
-    for f in failures:
-        print("  " + f)
-    sys.exit(1 if failures else 0)
+    gated = [t for m, t in failures if (m & ~a.gate_mask) == 0]
+    info = [t for m, t in failures if (m & ~a.gate_mask) != 0]
+    if info:
+        print(f"\n{len(info)} out-of-gate finding(s) (masks with bits outside --gate-mask {a.gate_mask}; information only):")
+        for t in info:
+            print("  " + t)
+    print("\n" + (f"ALL PASSED (gate mask {a.gate_mask})" if not gated else f"{len(gated)} FAILURE(S) within gate mask {a.gate_mask}:"))
+    for t in gated:
+        print("  " + t)
+    sys.exit(1 if gated else 0)
 
 
 if __name__ == "__main__":
