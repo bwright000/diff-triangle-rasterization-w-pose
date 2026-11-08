@@ -338,6 +338,46 @@ __forceinline__ __device__ bool in_frustum_triangle(int idx,
 	return true;
 }
 
+// PERF #1 (tight tile binning). Conservative test: may tile (tx, ty) contain a
+// pixel that the forward renderCUDA would count for this triangle?
+//
+// The forward counts pixel centre p = (px, py) (integers, as float) only if, for
+// all three stored edges k,  dist_k = n_k.x*px + n_k.y*py + o_k  evaluated in
+// float is <= 0 (otherwise it `continue`s with no side effect besides
+// `contributor++`). We return false (tile may be dropped) only if there is an
+// edge k whose EXACT edge function is > bound over every pixel centre of the
+// whole 16x16 tile, where bound is far above any float evaluation error of dist_k:
+//   |fl(dist_k) - dist_k| <= ~3u * S,  u = 2^-24,  S = |n.x|*x_max + |n.y|*y_max + |o|
+// (any FMA contraction / evaluation order), and bound = 1e-5*S + 1e-3 (>= 50x
+// that, plus an absolute 1e-3 px slack that also covers FTZ of denormals).
+// The minimum of a linear function over the tile's pixel-centre rectangle is
+// attained at a corner, so it is evaluated exactly in double (products of a float
+// and an integer < 2^13 are exact in double; the two sums round at 2^-53).
+// Explicit _rn intrinsics forbid contraction, so the result is bit-reproducible:
+// preprocessCUDA (count) and duplicateWithKeys (emit) MUST agree exactly.
+// NaN / inf edge data make every comparison false -> the tile is kept.
+__forceinline__ __device__ bool tileMayContainTriangle(const float2* n, const float* o, const uint32_t tx, const uint32_t ty)
+{
+	const double x0 = (double)(tx * BLOCK_X);
+	const double x1 = (double)(tx * BLOCK_X + BLOCK_X - 1);
+	const double y0 = (double)(ty * BLOCK_Y);
+	const double y1 = (double)(ty * BLOCK_Y + BLOCK_Y - 1);
+	for (int k = 0; k < 3; k++)
+	{
+		const double nx = (double)n[k].x;
+		const double ny = (double)n[k].y;
+		const double ok = (double)o[k];
+		const double ex = __dmul_rn(nx, (nx >= 0.0) ? x0 : x1);
+		const double ey = __dmul_rn(ny, (ny >= 0.0) ? y0 : y1);
+		const double emin = __dadd_rn(__dadd_rn(ex, ey), ok);
+		const double S = __dadd_rn(__dadd_rn(__dmul_rn(fabs(nx), x1), __dmul_rn(fabs(ny), y1)), fabs(ok));
+		const double bound = __dadd_rn(__dmul_rn(S, 1e-5), 1e-3);
+		if (emin > bound)
+			return false;
+	}
+	return true;
+}
+
 #define CHECK_CUDA(A, debug) \
 A; if(debug) { \
 auto ret = cudaDeviceSynchronize(); \

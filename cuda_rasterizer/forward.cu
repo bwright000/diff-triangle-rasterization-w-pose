@@ -443,6 +443,19 @@
 	 radii[idx] = max_distance;
 	 points_xy_image[idx] = center_triangle_2D;
 	 conic_opacity[idx] = {normal_cvx.x, normal_cvx.y, normal_cvx.z, triangle_weight};
+	 if (perf_mask & PERF_TIGHT_BINNING)
+	 {
+		 // PERF #1: count only the bbox tiles that may hold a counted pixel. Must use
+		 // exactly the same test, inputs and order as duplicateWithKeys (emit).
+		 // radii / scaling / rect_* are untouched (radii is a returned tensor).
+		 uint32_t n_tiles = 0;
+		 for (uint32_t ty = rect_min_triangle_test.y; ty < rect_max_triangle_test.y; ty++)
+			 for (uint32_t tx = rect_min_triangle_test.x; tx < rect_max_triangle_test.x; tx++)
+				 if (tileMayContainTriangle(normals + cumsum_for_triangle, offsets + cumsum_for_triangle, tx, ty))
+					 n_tiles++;
+		 tiles_touched[idx] = n_tiles;
+	 }
+	 else
 	 tiles_touched[idx] = (rect_max_triangle_test.y - rect_min_triangle_test.y) * (rect_max_triangle_test.x - rect_min_triangle_test.x);
 
  }

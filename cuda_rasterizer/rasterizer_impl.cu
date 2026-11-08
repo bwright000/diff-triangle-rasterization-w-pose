@@ -112,6 +112,11 @@
 		 {
 			 for (int x = rect_min_conv.x; x < rect_max_conv.x; x++)
 			 {
+				 // PERF #1: skip tiles that provably hold no counted pixel. Same test,
+				 // inputs and tile coordinates as the count in FORWARD::preprocessCUDA.
+				 if ((perf_mask & PERF_TIGHT_BINNING) &&
+					 !tileMayContainTriangle(edge_normals + 3 * idx, edge_offsets + 3 * idx, (uint32_t)x, (uint32_t)y))
+					 continue;
 				 uint64_t key = y * grid.x + x;
 				 key <<= 32;
 				 key |= *((uint32_t*)&depths[idx]);
