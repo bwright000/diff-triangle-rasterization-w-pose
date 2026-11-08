@@ -1068,10 +1068,16 @@ __global__ void propagateScreenGradsToPoseCUDA(
 			 const int coll_id = point_list[range_end - progress - 1];
 			 collected_id[block.thread_rank()] = coll_id;
 			 collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+			 // PERF #8: collected_colors / collected_depths / collected_xy are never
+			 // read. collected_colors also reads the PER-VERTEX colors array with a
+			 // TRIANGLE index (coll_id*C + i, coll_id < P, P > V): out of bounds (F1).
+			 if (!(perf_mask & PERF_DEAD_SMEM))
+			 {
 			 for (int i = 0; i < C; i++)
 				 collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
 			 collected_depths[block.thread_rank()] = depths[coll_id];
 			 collected_xy[block.thread_rank()] = means2D[coll_id];
+			 }
 			 for (int k = 0; k < 3; k++) {
 				collected_normals[MAX_NB_POINTS * block.thread_rank() + k] = normals[3 * coll_id + k];
 				collected_offsets[MAX_NB_POINTS * block.thread_rank() + k] = offsets[3 * coll_id + k];;

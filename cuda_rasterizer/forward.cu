@@ -557,8 +557,12 @@
 			 int coll_id = point_list[range.x + progress];
 			 collected_id[block.thread_rank()] = coll_id;
 			 collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+			 // PERF #8: collected_depths / collected_xy are never read (dead loads).
+			 if (!(perf_mask & PERF_DEAD_SMEM))
+			 {
 			 collected_depths[block.thread_rank()] = depths[coll_id];
 			 collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			 }
 			 for (int k = 0; k < 3; k++) {
 				collected_normals[MAX_NB_POINTS * block.thread_rank() + k] = normals[3 * coll_id + k];
 				collected_offsets[MAX_NB_POINTS * block.thread_rank() + k] = offsets[3 * coll_id + k];;
