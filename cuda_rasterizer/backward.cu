@@ -922,14 +922,17 @@ __global__ void propagateScreenGradsToPoseCUDA(
 	 const bool inside = pix.x < W&& pix.y < H;
 	 const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
  
-	 const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
- 
+	 int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
 	 bool done = !inside;
 	 int toDo = range.y - range.x;
- 
+	 // End (exclusive) of the walked part of this tile's list. PERF #2 may lower it.
+	 uint32_t range_end = range.y;
+
 	 __shared__ int collected_id[BLOCK_SIZE];
 	 __shared__ float4 collected_conic_opacity[BLOCK_SIZE];
 	 __shared__ float collected_colors[C * BLOCK_SIZE];
+	 __shared__ uint32_t s_max_last_contributor; // PERF #2
  
 	 /*
 	 ADDED FOR Triangle PURPOSES ==========================================================================
@@ -985,7 +988,27 @@ __global__ void propagateScreenGradsToPoseCUDA(
 	 float last_alpha = 0;
 	 float last_color[C] = { 0 };
 
- 
+	 // PERF #2: every list entry at relative index >= last_contributor is skipped
+	 // by a pixel (`contributor >= last_contributor -> continue`, no side effect).
+	 // So entries at index >= L = max over the block's active pixels of
+	 // last_contributor are skipped by all pixels: walk only [range.x, range.x+L).
+	 // contributor starts at L so it still equals the entry's relative index.
+	 // (Uniform branch: perf_mask is a kernel argument.)
+	 if (perf_mask & PERF_BW_START_AT_LAST)
+	 {
+		 if (block.thread_rank() == 0)
+			 s_max_last_contributor = 0;
+		 block.sync();
+		 if (!done && last_contributor > 0)
+			 atomicMax(&s_max_last_contributor, (uint32_t)last_contributor);
+		 block.sync();
+		 const uint32_t L = min(s_max_last_contributor, range.y - range.x);
+		 range_end = range.x + L;
+		 toDo = (int)L;
+		 rounds = ((int)L + BLOCK_SIZE - 1) / BLOCK_SIZE;
+		 contributor = L;
+	 }
+
 	 // Traverse all triangles
 	 for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	 {
@@ -993,9 +1016,9 @@ __global__ void propagateScreenGradsToPoseCUDA(
 		 // and load them in revers order.
 		 block.sync();
 		 const int progress = i * BLOCK_SIZE + block.thread_rank();
-		 if (range.x + progress < range.y)
+		 if (range.x + progress < range_end)
 		 {
-			 const int coll_id = point_list[range.y - progress - 1];
+			 const int coll_id = point_list[range_end - progress - 1];
 			 collected_id[block.thread_rank()] = coll_id;
 			 collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 			 for (int i = 0; i < C; i++)
