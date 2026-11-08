@@ -66,7 +66,8 @@ namespace CudaRasterizer
 			int* was_rendered = nullptr,
 			bool debug = false,
 			float min_triangle_area_pixels = 0.5f,
-			bool opacity_min = false);
+			bool opacity_min = false,
+			int perf_mask = 0);
 
 		static void backward(
 			const int P, const int V, int D, int M, int R,
@@ -104,7 +105,9 @@ namespace CudaRasterizer
 			float* dL_dtau,
 			bool debug,
 			bool optimize_pose_only = false,
-			bool opacity_min = false);
+			bool opacity_min = false,
+			int perf_mask = 0,
+			int grad_flags = 7);
 	};
 };
 

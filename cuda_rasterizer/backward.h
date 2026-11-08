@@ -59,7 +59,9 @@
 		 float* dL_dnormal3D,
 		 float* dL_dcolors,
 		 float* dL_dpoints2D,
-		 float* dL_dvertice_depth);
+		 float* dL_dvertice_depth,
+		 int perf_mask,
+		 int grad_flags);
 
 	 void computeVertexColorGradients(
         int V, int D, int M,

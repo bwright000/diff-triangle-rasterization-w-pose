@@ -156,7 +156,8 @@
 	 uint32_t* tiles_touched,
 	 bool prefiltered,
 	 const float min_triangle_area_pixels,
-	 const bool opacity_min)
+	 const bool opacity_min,
+	 const int perf_mask)
  {
 
 	 auto idx = cg::this_grid().thread_rank();
@@ -472,7 +473,8 @@
 	 float* __restrict__ out_color,
 	 float* __restrict__ out_others,
 	 float* __restrict__ max_blending,
-	 int* __restrict__ was_rendered)
+	 int* __restrict__ was_rendered,
+	 const int perf_mask)
  {
 	 // Identify current tile and associated min/max pixel range.
 	 auto block = cg::this_thread_block();
@@ -710,7 +712,8 @@
 	 float* out_color,
 	 float* out_others,
 	float* max_blending,
-	int* was_rendered)
+	int* was_rendered,
+	int perf_mask)
  {
 	 renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		 ranges,
@@ -733,7 +736,8 @@
 		 out_color,
 		 out_others,
 		 max_blending,
-		 was_rendered
+		 was_rendered,
+		 perf_mask
 		 );
  }
 
@@ -785,7 +789,8 @@
 	 uint32_t* tiles_touched,
 	 bool prefiltered,
 	 float min_triangle_area_pixels,
-	 bool opacity_min)
+	 bool opacity_min,
+	 int perf_mask)
  {
 	 preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
 		 P, D, M,
@@ -819,6 +824,7 @@
 		 tiles_touched,
 		 prefiltered,
 		 min_triangle_area_pixels,
-		 opacity_min
+		 opacity_min,
+		 perf_mask
 		 );
  }

@@ -19,9 +19,74 @@
 #
 
 from typing import NamedTuple
+import os
 import torch.nn as nn
 import torch
 from . import _C
+
+# ---------------------------------------------------------------------------
+# Runtime performance bitmask (see PERF_CHANGES.md and cuda_rasterizer/config.h).
+# 0 (default) = the original code path. Bits:
+#   1 = #1 tight tile binning          2 = #2 backward starts at max last_contributor
+#   4 = #3 zero-gradient pixel/tile skip 8 = #4 unused-gradient skip (ctx.needs_input_grad)
+#  16 = #8 dead shared-memory loads off 32 = #9 vertex attributes in shared memory
+#  64 = #10 warp-aggregated forward atomics
+# The initial value is read once at import from the env var S2TS2_PERF_MASK
+# (decimal or 0x.. hex). Each forward call snapshots the current mask and its
+# backward reuses that snapshot, so changing the mask between a forward and
+# its backward is safe.
+# ---------------------------------------------------------------------------
+PERF_TIGHT_BINNING = 1
+PERF_BW_START_AT_LAST = 2
+PERF_ZERO_GRAD_SKIP = 4
+PERF_UNUSED_GRAD_SKIP = 8
+PERF_DEAD_SMEM = 16
+PERF_SMEM_ATTR = 32
+PERF_WARP_AGG_ATOMICS = 64
+PERF_MASK_ALL = 127
+
+# grad_flags for #4 (must match cuda_rasterizer/config.h)
+_GRAD_NEED_COLORS = 1
+_GRAD_NEED_OPACITY = 2
+_GRAD_NEED_NORMAL3D = 4
+
+
+def set_perf_mask(mask):
+    """Set the process-wide perf bitmask used by subsequent forward calls (0..127)."""
+    mask = int(mask)
+    if mask < 0 or mask > PERF_MASK_ALL:
+        raise ValueError(f"perf mask must be in [0, {PERF_MASK_ALL}], got {mask}")
+    _C.set_perf_mask(mask)
+
+
+def get_perf_mask():
+    return int(_C.get_perf_mask())
+
+
+set_perf_mask(int(os.environ.get("S2TS2_PERF_MASK", "0"), 0))
+
+
+def _grad_flags(ctx, optimize_pose_only):
+    """Item #4: which render-kernel gradient buffers have a consumer.
+
+    Indices of ctx.needs_input_grad follow _RasterizeTriangles.forward's inputs:
+      0 vertices, 1 triangles_indices, 2 vertex_weights, 3 sigma, 4 sh,
+      5 colors_precomp, 6 scaling, 7 w (-> dL_dtau[3:6]), 8 trans, 9 raster_settings.
+    - dL_dcolors is returned as grad_colors_precomp and feeds dL_dsh, which is only
+      computed when not optimize_pose_only (computeVertexColorGradients is skipped
+      otherwise and grad_sh stays zero).
+    - dL_dopacity only feeds dL_dvertice_weights, after the pose-only early return.
+    - dL_dnormal3D only feeds dL_dtau[3:6] (= grad_w), after the pose-only early return.
+    """
+    needs = ctx.needs_input_grad
+    flags = 0
+    if needs[5] or (needs[4] and not optimize_pose_only):
+        flags |= _GRAD_NEED_COLORS
+    if needs[2] and not optimize_pose_only:
+        flags |= _GRAD_NEED_OPACITY
+    if needs[7] and not optimize_pose_only:
+        flags |= _GRAD_NEED_NORMAL3D
+    return flags
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
@@ -68,9 +133,12 @@ class _RasterizeTriangles(torch.autograd.Function):
         raster_settings,
     ):
 
+        # Snapshot the perf mask: the matching backward uses the same value.
+        perf_mask = get_perf_mask()
+
         # Restructure arguments the way that the C++ lib expects them
         args = (
-            raster_settings.bg, 
+            raster_settings.bg,
             vertices,
             triangles_indices,
             vertex_weights,
@@ -93,6 +161,7 @@ class _RasterizeTriangles(torch.autograd.Function):
             raster_settings.debug,
             getattr(raster_settings, 'min_triangle_area_pixels', 0.5),
             getattr(raster_settings, 'opacity_min', False),
+            perf_mask,
         )
 
 
@@ -112,6 +181,7 @@ class _RasterizeTriangles(torch.autograd.Function):
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.sigma = sigma
+        ctx.perf_mask = perf_mask
         ctx.save_for_backward(vertices, triangles_indices, vertex_weights, colors_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
         return color, radii, scaling, depth, max_blending, was_rendered
 
@@ -150,7 +220,9 @@ class _RasterizeTriangles(torch.autograd.Function):
                 imgBuffer,
                 raster_settings.debug,
                 getattr(raster_settings, 'optimize_pose_only', False),
-                getattr(raster_settings, 'opacity_min', False))
+                getattr(raster_settings, 'opacity_min', False),
+                ctx.perf_mask,
+                _grad_flags(ctx, getattr(raster_settings, 'optimize_pose_only', False)))
 
         # Compute gradients for relevant tensors by invoking backward method
         if raster_settings.debug:

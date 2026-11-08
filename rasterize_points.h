@@ -50,7 +50,8 @@ RasterizetrianglesCUDA(
 	const bool prefiltered,
 	const bool debug,
 	const float min_triangle_area_pixels,
-	const bool opacity_min);
+	const bool opacity_min,
+	const int perf_mask = 0);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizetrianglesBackwardCUDA(
@@ -79,7 +80,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& imageBuffer,
 	const bool debug,
 	const bool optimize_pose_only = false,
-	const bool opacity_min = false);
+	const bool opacity_min = false,
+	const int perf_mask = 0,
+	const int grad_flags = 7);
+
+// Process-wide default perf bitmask (see cuda_rasterizer/config.h). The python
+// wrapper reads it once per forward call and passes it explicitly to both the
+// forward and the matching backward; kernels only ever see it as an argument.
+void setPerfMask(const int mask);
+int getPerfMask();
 		
 torch::Tensor markVisible(
 		torch::Tensor& means3D,

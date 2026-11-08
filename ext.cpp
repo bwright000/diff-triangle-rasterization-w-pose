@@ -29,4 +29,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mark_visible", &markVisible);
   m.def("compute_relocation", &ComputeRelocationCUDA);
   m.def("adamUpdate", &adamUpdate);
+  m.def("set_perf_mask", &setPerfMask);
+  m.def("get_perf_mask", &getPerfMask);
 }

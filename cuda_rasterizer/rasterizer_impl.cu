@@ -89,7 +89,10 @@
 	 uint64_t* Triangle_keys_unsorted,
 	 uint32_t* Triangle_values_unsorted,
 	 int* radii,
-	 dim3 grid)
+	 dim3 grid,
+	 const float2* edge_normals,
+	 const float* edge_offsets,
+	 int perf_mask)
  {
 	 auto idx = cg::this_grid().thread_rank();
 	 if (idx >= P)
@@ -241,7 +244,8 @@
 	 int* was_rendered,
 	 bool debug,
 	 float min_triangle_area_pixels,
-	 bool opacity_min)
+	 bool opacity_min,
+	 int perf_mask)
  {
 	 const float focal_y = height / (2.0f * tan_fovy);
 	 const float focal_x = width / (2.0f * tan_fovx);
@@ -300,7 +304,8 @@
 		 geomState.tiles_touched,
 		 prefiltered,
 		 min_triangle_area_pixels,
-		 opacity_min
+		 opacity_min,
+		 perf_mask
 	 ), debug)
 
 
@@ -344,7 +349,10 @@
 		 binningState.point_list_keys_unsorted,
 		 binningState.point_list_unsorted,
 		 radii,
-		 tile_grid)
+		 tile_grid,
+		 geomState.normals,
+		 geomState.offsets,
+		 perf_mask)
 	 CHECK_CUDA(, debug)
  
 	 int bit = getHigherMsb(tile_grid.x * tile_grid.y);
@@ -391,7 +399,8 @@
 		 out_color,
 		 out_others,
 		 max_blending,
-		 was_rendered), debug)
+		 was_rendered,
+		 perf_mask), debug)
  
 	 return num_rendered;
  }
@@ -434,7 +443,9 @@
 	 float* dL_dtau,
 	 bool debug,
 	 bool optimize_pose_only,
-	 bool opacity_min)
+	 bool opacity_min,
+	 int perf_mask,
+	 int grad_flags)
  {
 	 GeometryState geomState = GeometryState::fromChunk(geom_buffer, P, total_nb_points, V);
 	 BinningState binningState = BinningState::fromChunk(binning_buffer, R);
@@ -484,7 +495,9 @@
 		 dL_dnormal3D,
 		 dL_dcolor,
 		 dL_dpoints2D,
-		 dL_dvertice_depth), debug)
+		 dL_dvertice_depth,
+		 perf_mask,
+		 grad_flags), debug)
  
 
 	if (!optimize_pose_only && colors_precomp == nullptr) {

@@ -906,7 +906,9 @@ __global__ void propagateScreenGradsToPoseCUDA(
 	 float* __restrict__ dL_dnormal3D,
 	 float* __restrict__ dL_dcolors,
 	 float* __restrict__ dL_dpoints2D,
-	 float* __restrict__ dL_dvertice_depth)
+	 float* __restrict__ dL_dvertice_depth,
+	 const int perf_mask,
+	 const int grad_flags)
  {
 	 // We rasterize again. Compute necessary block info.
 	 auto block = cg::this_thread_block();
@@ -1406,7 +1408,9 @@ void BACKWARD::propagateScreenGradsToPose(
 	 float* dL_dnormal3D,
 	 float* dL_dcolors,
 	 float* dL_dpoints2D,
-	 float* dL_dvertice_depth
+	 float* dL_dvertice_depth,
+	 int perf_mask,
+	 int grad_flags
 	)
  {
 	 renderCUDA<NUM_CHANNELS> << <grid, block >> >(
@@ -1436,6 +1440,8 @@ void BACKWARD::propagateScreenGradsToPose(
 		 dL_dnormal3D,
 		 dL_dcolors,
 		 dL_dpoints2D,
-		 dL_dvertice_depth
+		 dL_dvertice_depth,
+		 perf_mask,
+		 grad_flags
 		 );
  }

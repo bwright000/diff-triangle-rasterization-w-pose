@@ -37,6 +37,21 @@
 #include "cuda_rasterizer/utils.h"
 #include "cuda_rasterizer/adam.h"
 
+// Process-wide default perf bitmask (host only; never read by a kernel directly).
+static int g_perf_mask = 0;
+
+void setPerfMask(const int mask)
+{
+	if (mask < 0 || mask > PERF_MASK_ALL)
+		throw std::runtime_error("set_perf_mask: mask must be in [0, " + std::to_string(PERF_MASK_ALL) + "]");
+	g_perf_mask = mask;
+}
+
+int getPerfMask()
+{
+	return g_perf_mask;
+}
+
 std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     auto lambda = [&t](size_t N) {
         t.resize_({(long long)N});
@@ -69,9 +84,10 @@ RasterizetrianglesCUDA(
 	const bool prefiltered,
 	const bool debug,
 	const float min_triangle_area_pixels,
-	const bool opacity_min)
+	const bool opacity_min,
+	const int perf_mask)
 {
-    
+
   const int P = triangles_indices.size(0);
   const int V = vertices.size(0); 
   const int H = image_height;
@@ -137,7 +153,8 @@ RasterizetrianglesCUDA(
 		was_rendered.contiguous().data_ptr<int>(),
 		debug,
 		min_triangle_area_pixels,
-		opacity_min);
+		opacity_min,
+		perf_mask);
   }
   return std::make_tuple(rendered, out_color, out_others, radii, was_rendered, geomBuffer, binningBuffer, imgBuffer, scaling, max_blending);
 }
@@ -169,7 +186,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& imageBuffer,
 	const bool debug,
 	const bool optimize_pose_only,
-	const bool opacity_min) 
+	const bool opacity_min,
+	const int perf_mask,
+	const int grad_flags)
 {
   const int P = triangles_indices.size(0); // number of triangles
   const int H = dL_dout_color.size(1);
@@ -240,7 +259,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dtau.contiguous().data_ptr<float>(),
 	  debug,
 	  optimize_pose_only,
-	  opacity_min);
+	  opacity_min,
+	  perf_mask,
+	  grad_flags);
   }
 
   return std::make_tuple(dL_dvertices3D, dL_dvertice_weight, dL_dcolors, dL_dsh, dL_dtau);

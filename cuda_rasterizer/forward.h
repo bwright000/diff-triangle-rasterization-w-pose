@@ -63,7 +63,8 @@
 		 uint32_t* tiles_touched,
 		 bool prefiltered,
 		 float min_triangle_area_pixels,
-		 bool opacity_min);
+		 bool opacity_min,
+		 int perf_mask);
 
 	void computeVertexColors(
 		int V, int D, int M,
@@ -98,7 +99,8 @@
 		 float* out_color,
 		 float* out_others, 
 		 float* max_blending,
-		 int* was_rendered);
+		 int* was_rendered,
+		 int perf_mask);
  }
  
  
