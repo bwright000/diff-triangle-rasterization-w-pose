@@ -26,7 +26,20 @@
  #include <cooperative_groups.h>
  #include <cooperative_groups/reduce.h>
  namespace cg = cooperative_groups;
- 
+
+ // PERF #3: atomicAdd that drops exactly-zero addends when skip_zero is set.
+ // Exact: the render-kernel gradient buffers start at +0 (torch::zeros) and
+ // +0 + (-0) = +0 (round-to-nearest), so an accumulator is never -0, and
+ // x + (+-0) == x for every x != -0 (incl. inf / NaN). NaN != 0, so a NaN
+ // addend is still added. (Global float atomicAdd flushes subnormals anyway;
+ // with --use_fast_math the compare also flushes them, i.e. the same +-0.)
+ // skip_zero == false: identical to a plain atomicAdd.
+ __device__ __forceinline__ void atomicAddSkipZero(float* address, const float val, const bool skip_zero)
+ {
+	 if (!skip_zero || val != 0.0f)
+		 atomicAdd(address, val);
+ }
+
  __device__ void circumcenter_backward(float3 A, float3 B, float3 C, float3 dU, float3* dA, float3* dB, float3* dC) {
     // Forward recomputation
     float3 AB = make_float3(B.x-A.x, B.y-A.y, B.z-A.z);
@@ -920,6 +933,7 @@ __global__ void propagateScreenGradsToPoseCUDA(
 	 const float2 pixf = { (float)pix.x, (float)pix.y };
  
 	 const bool inside = pix.x < W&& pix.y < H;
+	 const bool zskip = (perf_mask & PERF_ZERO_GRAD_SKIP) != 0; // PERF #3
 	 const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
  
 	 int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -987,6 +1001,33 @@ __global__ void propagateScreenGradsToPoseCUDA(
  
 	 float last_alpha = 0;
 	 float last_color[C] = { 0 };
+
+	 // PERF #3: zero-gradient pixel skip. If every per-pixel loss gradient read
+	 // above is exactly +-0 (NaN != 0 keeps the pixel), every addend this pixel
+	 // would atomically add is a product with a +-0 factor and finite other
+	 // factors (alpha <= 0.99 so T and 1/(1-alpha) are finite; phi_x < 0 strictly
+	 // for any hit reaching the gradient code, since phi_x == 0 gives Cx == 0 and
+	 // the alpha < 1/255 `continue`, and FTZ removes subnormal phi_x; invDen is
+	 // finite for triangles that pass the forward's inradius cull; sigma > 0),
+	 // i.e. +-0. All gradient buffers start at +0 (torch::zeros) and +0 + (-0) =
+	 // +0 in round-to-nearest, so they can never hold -0 and x + (+-0) == x for
+	 // every other x: skipping the pixel leaves every output bit-identical.
+	 if ((perf_mask & PERF_ZERO_GRAD_SKIP) && inside)
+	 {
+		 bool any_grad = (dL_ddepth != 0.0f) || (dL_daccum != 0.0f) || (dL_dmedian_depth != 0.0f);
+		 for (int ch = 0; ch < C; ch++)
+			 any_grad = any_grad || (dL_dpixel[ch] != 0.0f);
+		 for (int ch = 0; ch < 3; ch++)
+			 any_grad = any_grad || (dL_dnormal2D[ch] != 0.0f);
+		 if (!any_grad)
+			 done = true;
+	 }
+	 // PERF #3: a tile whose pixels are all done has nothing to add (uniform branch).
+	 if (perf_mask & PERF_ZERO_GRAD_SKIP)
+	 {
+		 if (__syncthreads_count(done) == BLOCK_SIZE)
+			 return;
+	 }
 
 	 // PERF #2: every list entry at relative index >= last_contributor is skipped
 	 // by a pixel (`contributor >= last_contributor -> continue`, no side effect).
@@ -1148,17 +1189,17 @@ __global__ void propagateScreenGradsToPoseCUDA(
 				float grad1 = dchannel_dcolor * dL_dchannel * b0;  // matches forward's c1 * b0
 				float grad2 = dchannel_dcolor * dL_dchannel * b1;  // matches forward's c2 * b1
 
-				atomicAdd(&dL_dcolors[v0*C + ch], grad0);
-				atomicAdd(&dL_dcolors[v1*C + ch], grad1);
-				atomicAdd(&dL_dcolors[v2*C + ch], grad2);
+				atomicAddSkipZero(&dL_dcolors[v0*C + ch], grad0, zskip);
+				atomicAddSkipZero(&dL_dcolors[v1*C + ch], grad1, zskip);
+				atomicAddSkipZero(&dL_dcolors[v2*C + ch], grad2, zskip);
 
 			 } 
 
 			 float depth_interp = wA * depth_vertex_0 + wB * depth_vertex_1 + wC * depth_vertex_2;
 			 float weight_here = alpha * T;
-			 atomicAdd(&dL_dvertice_depth[vertex_idx0], dL_ddepth * weight_here * wA);
-			 atomicAdd(&dL_dvertice_depth[vertex_idx1], dL_ddepth * weight_here * wB);
-			 atomicAdd(&dL_dvertice_depth[vertex_idx2], dL_ddepth * weight_here * wC);
+			 atomicAddSkipZero(&dL_dvertice_depth[vertex_idx0], dL_ddepth * weight_here * wA, zskip);
+			 atomicAddSkipZero(&dL_dvertice_depth[vertex_idx1], dL_ddepth * weight_here * wB, zskip);
+			 atomicAddSkipZero(&dL_dvertice_depth[vertex_idx2], dL_ddepth * weight_here * wC, zskip);
 
 			 
 			 // Backpropagation to the vertices
@@ -1173,9 +1214,9 @@ __global__ void propagateScreenGradsToPoseCUDA(
 				  dL_db2 += dL_dmedian_depth * depth_vertex_0;
 
 				  // Accumulate gradients to vertex depths
-				  atomicAdd(&dL_dvertice_depth[vertex_idx0], dL_dmedian_depth * wA);
-				  atomicAdd(&dL_dvertice_depth[vertex_idx1], dL_dmedian_depth * wB);
-				  atomicAdd(&dL_dvertice_depth[vertex_idx2], dL_dmedian_depth * wC);
+				  atomicAddSkipZero(&dL_dvertice_depth[vertex_idx0], dL_dmedian_depth * wA, zskip);
+				  atomicAddSkipZero(&dL_dvertice_depth[vertex_idx1], dL_dmedian_depth * wB, zskip);
+				  atomicAddSkipZero(&dL_dvertice_depth[vertex_idx2], dL_dmedian_depth * wC, zskip);
 			  }
 
 			 // Recompute necessary terms for derivatives
@@ -1239,12 +1280,12 @@ __global__ void propagateScreenGradsToPoseCUDA(
 			 float dL_dy2 = dL_db0 * db0_dy2 + dL_db1 * db1_dy2 + dL_db2 * db2_dy2;
 
 			 // Update gradients for vertex positions
-			 atomicAdd(&dL_dpoints2D[vertex_idx0 * 2], dL_dx0);
-			 atomicAdd(&dL_dpoints2D[vertex_idx0 * 2 + 1], dL_dy0);
-			 atomicAdd(&dL_dpoints2D[vertex_idx1 * 2], dL_dx1);
-			 atomicAdd(&dL_dpoints2D[vertex_idx1 * 2 + 1], dL_dy1);
-			 atomicAdd(&dL_dpoints2D[vertex_idx2 * 2], dL_dx2);
-			 atomicAdd(&dL_dpoints2D[vertex_idx2 * 2 + 1], dL_dy2); 
+			 atomicAddSkipZero(&dL_dpoints2D[vertex_idx0 * 2], dL_dx0, zskip);
+			 atomicAddSkipZero(&dL_dpoints2D[vertex_idx0 * 2 + 1], dL_dy0, zskip);
+			 atomicAddSkipZero(&dL_dpoints2D[vertex_idx1 * 2], dL_dx1, zskip);
+			 atomicAddSkipZero(&dL_dpoints2D[vertex_idx1 * 2 + 1], dL_dy1, zskip);
+			 atomicAddSkipZero(&dL_dpoints2D[vertex_idx2 * 2], dL_dx2, zskip);
+			 atomicAddSkipZero(&dL_dpoints2D[vertex_idx2 * 2 + 1], dL_dy2, zskip); 
  
 			 // Propagate gradients w.r.t ray-splat depths
 			 accum_depth_rec = last_alpha * last_depth + (1.f - last_alpha) * accum_depth_rec;
@@ -1258,7 +1299,7 @@ __global__ void propagateScreenGradsToPoseCUDA(
 				 accum_normal_rec[ch] = last_alpha * last_normal[ch] + (1.f - last_alpha) * accum_normal_rec[ch];
 				 last_normal[ch] = normal[ch];
 				 dL_dalpha += (normal[ch] - accum_normal_rec[ch]) * dL_dnormal2D[ch];
-				 atomicAdd((&dL_dnormal3D[global_id * 3 + ch]), alpha * T * dL_dnormal2D[ch]);
+				 atomicAddSkipZero((&dL_dnormal3D[global_id * 3 + ch]), alpha * T * dL_dnormal2D[ch], zskip);
 			 }
  
 			 dL_dalpha *= T;
@@ -1283,14 +1324,14 @@ __global__ void propagateScreenGradsToPoseCUDA(
 				if (fabsf(distances[k] - max_val) < 1e-6f) {
 					float dL_dnormal_x = dL_dphi_x * pixf.x;
 					float dL_dnormal_y = dL_dphi_x * pixf.y;
-					atomicAdd(&(dL_dnormals[aux + k].x), dL_dnormal_x);
-					atomicAdd(&(dL_dnormals[aux + k].y), dL_dnormal_y);
-					atomicAdd(&(dL_doffsets[aux + k]), dL_dphi_x);
+					atomicAddSkipZero(&(dL_dnormals[aux + k].x), dL_dnormal_x, zskip);
+					atomicAddSkipZero(&(dL_dnormals[aux + k].y), dL_dnormal_y, zskip);
+					atomicAddSkipZero(&(dL_doffsets[aux + k]), dL_dphi_x, zskip);
 				}
 			 }
  
 			 // Update gradients w.r.t. opacity of the Triangle
-			 atomicAdd(&(dL_dopacity[global_id]), dL_dalpha * Cx);
+			 atomicAddSkipZero(&(dL_dopacity[global_id]), dL_dalpha * Cx, zskip);
  
 		 }
 	 }
