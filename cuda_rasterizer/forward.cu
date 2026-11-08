@@ -25,6 +25,37 @@
  #include <cooperative_groups.h>
  #include <cooperative_groups/reduce.h>
  namespace cg = cooperative_groups;
+
+ // PERF #10: warp-aggregated integer atomics. The lanes currently executing the
+ // call are grouped by key (labeled_partition = __match_any_sync); one lane per
+ // group issues a single atomic with the group's max / count. Integer max and
+ // integer add are exact and order-independent, so the final memory values are
+ // identical to one atomic per lane. Needs sm_70+ (match); older archs and the
+ // host pass fall back to the plain per-lane atomic.
+ __device__ __forceinline__ void warpAggAtomicMaxInt(int* base, const int key, const int val)
+ {
+ #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
+	 cg::coalesced_group active = cg::coalesced_threads();
+	 cg::coalesced_group peers = cg::labeled_partition(active, key);
+	 const int m = cg::reduce(peers, val, cg::greater<int>());
+	 if (peers.thread_rank() == 0)
+		 atomicMax(base + key, m);
+ #else
+	 atomicMax(base + key, val);
+ #endif
+ }
+
+ __device__ __forceinline__ void warpAggAtomicAddOneInt(int* base, const int key)
+ {
+ #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
+	 cg::coalesced_group active = cg::coalesced_threads();
+	 cg::coalesced_group peers = cg::labeled_partition(active, key);
+	 if (peers.thread_rank() == 0)
+		 atomicAdd(base + key, (int)peers.size());
+ #else
+	 atomicAdd(base + key, 1);
+ #endif
+ }
  
  
  
@@ -639,6 +670,9 @@
 			 
 			 float blending_weight = alpha * T;
 			 // Update the maximum blending weight in a thread-safe way
+			 if (perf_mask & PERF_WARP_AGG_ATOMICS)
+				 warpAggAtomicMaxInt((int*)max_blending, j_id, *((int*)(&blending_weight)));
+			 else
 			 atomicMax(((int*)max_blending) + j_id, *((int*)(&blending_weight)));
 
 			 // COLOR INTERPOLATION
@@ -714,6 +748,9 @@
 				 median_depth = depth_interp;
 				 median_contributor = contributor;
 				 pixel_influence = j_id;
+				 if (perf_mask & PERF_WARP_AGG_ATOMICS)
+					 warpAggAtomicAddOneInt(was_rendered, j_id);
+				 else
 				 atomicAdd(was_rendered + j_id, 1);
 			 }
 			 // Render normal map
